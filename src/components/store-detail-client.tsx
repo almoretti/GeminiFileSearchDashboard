@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { DocumentsTable } from "@/components/documents-table";
 import { UploadDialog } from "@/components/upload-dialog";
+import { MetadataFilter } from "@/components/metadata-filter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -62,6 +63,7 @@ export function StoreDetailClient({ id }: StoreDetailClientProps) {
   const [loadingDocuments, setLoadingDocuments] = useState(true);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [metadataFilter, setMetadataFilter] = useState("");
 
   const storeResourceName = store?.name || `fileSearchStores/${id}`;
 
@@ -102,10 +104,16 @@ export function StoreDetailClient({ id }: StoreDetailClientProps) {
     }
   };
 
-  const fetchDocuments = async () => {
+  const fetchDocuments = useCallback(async (filter?: string) => {
     setLoadingDocuments(true);
     try {
-      const response = await fetch(`/api/stores/${id}/documents`);
+      const params = new URLSearchParams();
+      if (filter) {
+        params.set("filter", filter);
+      }
+      const queryString = params.toString();
+      const url = `/api/stores/${id}/documents${queryString ? `?${queryString}` : ""}`;
+      const response = await fetch(url);
       if (!response.ok) {
         throw new Error("Failed to fetch documents");
       }
@@ -121,22 +129,26 @@ export function StoreDetailClient({ id }: StoreDetailClientProps) {
     } finally {
       setLoadingDocuments(false);
     }
-  };
+  }, [id, toast]);
 
   useEffect(() => {
     fetchStore();
-    fetchDocuments();
-  }, [id]);
+    fetchDocuments(metadataFilter);
+  }, [id, fetchDocuments, metadataFilter]);
 
   const handleRefresh = () => {
     fetchStore();
-    fetchDocuments();
+    fetchDocuments(metadataFilter);
+  };
+
+  const handleFilterChange = (filter: string) => {
+    setMetadataFilter(filter);
   };
 
   const handleUploadComplete = () => {
     setUploadDialogOpen(false);
     fetchStore();
-    fetchDocuments();
+    fetchDocuments(metadataFilter);
   };
 
   const activeCount = parseInt(store?.activeDocumentsCount || "0");
@@ -268,9 +280,18 @@ export function StoreDetailClient({ id }: StoreDetailClientProps) {
         </Card>
       </div>
 
-      {/* Documents Table */}
+      {/* Documents Section */}
       <div className="mb-4">
-        <h2 className="text-xl font-semibold mb-4">Documents</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-semibold">Documents</h2>
+        </div>
+
+        {/* Metadata Filter */}
+        <MetadataFilter
+          documents={documents}
+          onFilterChange={handleFilterChange}
+          currentFilter={metadataFilter}
+        />
       </div>
 
       <DocumentsTable

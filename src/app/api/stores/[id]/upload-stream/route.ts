@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uploadToStore, shouldSplitFile, splitFile } from "@/lib/api";
+import { uploadToStore, shouldSplitFile, splitFile, ChunkingConfig } from "@/lib/api";
 import { auth } from "@/lib/auth";
 
 interface CustomMetadata {
@@ -85,6 +85,19 @@ export async function POST(
         }
       }
 
+      // Parse chunking config
+      const chunkingConfigStr = formData.get("chunkingConfig") as string | null;
+      let chunkingConfig: ChunkingConfig | undefined;
+      if (chunkingConfigStr) {
+        try {
+          chunkingConfig = JSON.parse(chunkingConfigStr);
+        } catch {
+          await sendEvent("error", { message: "Invalid chunking config format" });
+          await writer.close();
+          return;
+        }
+      }
+
       const buffer = Buffer.from(await file.arrayBuffer());
       const mimeType = getMimeType(file.name, file.type);
 
@@ -137,7 +150,8 @@ export async function POST(
               part.fileName,
               mimeType,
               displayName ? `${displayName} (Part ${part.partNumber}/${part.totalParts})` : undefined,
-              partMetadata
+              partMetadata,
+              chunkingConfig
             );
             operations.push(operation);
 
@@ -179,7 +193,8 @@ export async function POST(
           file.name,
           mimeType,
           displayName || undefined,
-          customMetadata
+          customMetadata,
+          chunkingConfig
         );
 
         await sendEvent("complete", {

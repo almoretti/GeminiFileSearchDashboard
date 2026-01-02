@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Upload, FileUp, X, CheckCircle, Plus, Trash2, SplitSquareHorizontal, FileBox } from "lucide-react";
+import { Loader2, Upload, FileUp, X, CheckCircle, Plus, Trash2, SplitSquareHorizontal, FileBox, Settings2, ChevronDown, ChevronUp } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 
 interface UploadDialogProps {
@@ -50,6 +50,10 @@ export function UploadDialog({
   const [errorMessage, setErrorMessage] = useState("");
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [useSplitUpload, setUseSplitUpload] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [useCustomChunking, setUseCustomChunking] = useState(false);
+  const [maxTokensPerChunk, setMaxTokensPerChunk] = useState(200);
+  const [maxOverlapTokens, setMaxOverlapTokens] = useState(20);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -180,7 +184,20 @@ export function UploadDialog({
         );
       }
 
-      console.log(`[Client] Starting upload for file: ${file.name}, size: ${(file.size / 1024).toFixed(2)}KB, splitMode: ${useSplitUpload}`);
+      // Add chunking config if enabled
+      if (useCustomChunking) {
+        formData.append(
+          "chunkingConfig",
+          JSON.stringify({
+            white_space_config: {
+              max_tokens_per_chunk: maxTokensPerChunk,
+              max_overlap_tokens: maxOverlapTokens,
+            },
+          })
+        );
+      }
+
+      console.log(`[Client] Starting upload for file: ${file.name}, size: ${(file.size / 1024).toFixed(2)}KB, splitMode: ${useSplitUpload}, customChunking: ${useCustomChunking}`);
 
       if (useSplitUpload) {
         // Use streaming endpoint for progress updates (split upload)
@@ -347,6 +364,10 @@ export function UploadDialog({
     setErrorMessage("");
     setProgress(null);
     setUseSplitUpload(true);
+    setShowAdvanced(false);
+    setUseCustomChunking(false);
+    setMaxTokensPerChunk(200);
+    setMaxOverlapTokens(20);
     onOpenChange(false);
   };
 
@@ -513,6 +534,102 @@ export function UploadDialog({
               onCheckedChange={setUseSplitUpload}
               disabled={isProcessing}
             />
+          </div>
+
+          {/* Advanced Settings */}
+          <div className="border rounded-lg">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              disabled={isProcessing}
+              className="flex items-center justify-between w-full py-2 px-3 text-sm font-medium hover:bg-muted/50 transition-colors disabled:opacity-50"
+            >
+              <div className="flex items-center gap-2">
+                <Settings2 className="h-4 w-4 text-muted-foreground" />
+                <span>Advanced Settings</span>
+              </div>
+              {showAdvanced ? (
+                <ChevronUp className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+              )}
+            </button>
+
+            {showAdvanced && (
+              <div className="px-3 pb-3 space-y-4 border-t">
+                {/* Chunking Configuration */}
+                <div className="pt-3">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <Label htmlFor="custom-chunking" className="text-sm font-medium cursor-pointer">
+                        Custom Chunking
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        Control how documents are split for indexing
+                      </p>
+                    </div>
+                    <Switch
+                      id="custom-chunking"
+                      checked={useCustomChunking}
+                      onCheckedChange={setUseCustomChunking}
+                      disabled={isProcessing}
+                    />
+                  </div>
+
+                  {useCustomChunking && (
+                    <div className="space-y-3 pl-1">
+                      <div className="grid gap-2">
+                        <div className="flex items-center justify-between">
+                          <Label htmlFor="max-tokens" className="text-xs">
+                            Max tokens per chunk
+                          </Label>
+                          <span className="text-xs text-muted-foreground">
+                            {maxTokensPerChunk}
+                          </span>
+                        </div>
+                        <Input
+                          id="max-tokens"
+                          type="number"
+                          min={50}
+                          max={1000}
+                          value={maxTokensPerChunk}
+                          onChange={(e) => setMaxTokensPerChunk(Math.min(1000, Math.max(50, parseInt(e.target.value) || 200)))}
+                          disabled={isProcessing}
+                          className="h-8"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Smaller chunks (200) = precise retrieval. Larger (500+) = more context.
+                        </p>
+                      </div>
+
+                      <div className="grid gap-2">
+                        <div className="flex items-center justify-between">
+                          <Label htmlFor="overlap-tokens" className="text-xs">
+                            Overlap tokens
+                          </Label>
+                          <span className="text-xs text-muted-foreground">
+                            {maxOverlapTokens}
+                          </span>
+                        </div>
+                        <Input
+                          id="overlap-tokens"
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={maxOverlapTokens}
+                          onChange={(e) => setMaxOverlapTokens(Math.min(100, Math.max(0, parseInt(e.target.value) || 20)))}
+                          disabled={isProcessing}
+                          className="h-8"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Tokens shared between adjacent chunks for context continuity.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Status display */}

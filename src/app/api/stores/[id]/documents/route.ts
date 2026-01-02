@@ -10,11 +10,13 @@ export async function GET(
     const searchParams = request.nextUrl.searchParams;
     const pageSize = searchParams.get("pageSize");
     const pageToken = searchParams.get("pageToken");
+    const filter = searchParams.get("filter");
 
     const data = await listDocuments(
       id,
       pageSize ? parseInt(pageSize) : undefined,
-      pageToken || undefined
+      pageToken || undefined,
+      filter || undefined
     );
 
     return NextResponse.json(data);

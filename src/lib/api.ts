@@ -131,11 +131,13 @@ export async function deleteStore(
 export async function listDocuments(
   storeId: string,
   pageSize?: number,
-  pageToken?: string
+  pageToken?: string,
+  filter?: string
 ): Promise<ListDocumentsResponse> {
   const params = new URLSearchParams();
   if (pageSize) params.set("pageSize", pageSize.toString());
   if (pageToken) params.set("pageToken", pageToken);
+  if (filter) params.set("filter", filter);
   const query = params.toString();
   return apiRequest<ListDocumentsResponse>(
     `/fileSearchStores/${storeId}/documents${query ? `?${query}` : ""}`
@@ -168,6 +170,16 @@ export interface CustomMetadata {
   stringValue?: string;
   stringListValue?: { values: string[] };
   numericValue?: number;
+}
+
+// Chunking configuration types
+export interface WhiteSpaceConfig {
+  max_tokens_per_chunk: number;
+  max_overlap_tokens?: number;
+}
+
+export interface ChunkingConfig {
+  white_space_config?: WhiteSpaceConfig;
 }
 
 // Helper for timeout wrapper
@@ -298,7 +310,8 @@ export async function uploadToStore(
   fileName: string,
   mimeType: string,
   displayName?: string,
-  customMetadata?: CustomMetadata[]
+  customMetadata?: CustomMetadata[],
+  chunkingConfig?: ChunkingConfig
 ): Promise<Operation> {
   const apiKey = getApiKey();
   const fileSizeKB = (fileBuffer.length / 1024).toFixed(2);
@@ -307,6 +320,9 @@ export async function uploadToStore(
 
   console.log(`[Upload] Starting upload to store ${storeId}`);
   console.log(`[Upload] File: ${fileName}, Size: ${fileSizeKB}KB (${fileSizeMB}MB), MimeType: ${mimeType}`);
+  if (chunkingConfig?.white_space_config) {
+    console.log(`[Upload] Chunking config: max_tokens=${chunkingConfig.white_space_config.max_tokens_per_chunk}, overlap=${chunkingConfig.white_space_config.max_overlap_tokens || 0}`);
+  }
 
   // Build the request body with metadata
   const requestBody: Record<string, unknown> = {};
@@ -317,6 +333,10 @@ export async function uploadToStore(
 
   if (customMetadata && customMetadata.length > 0) {
     requestBody.customMetadata = customMetadata;
+  }
+
+  if (chunkingConfig) {
+    requestBody.chunking_config = chunkingConfig;
   }
 
   const uploadStartTime = Date.now();

@@ -2,6 +2,17 @@
 
 A web application for managing Google Generative AI File Search stores. Create stores, upload documents, and manage your file search data through an intuitive dashboard.
 
+## Why This Tool?
+
+Google's Gemini File Search API provides powerful RAG (Retrieval-Augmented Generation) capabilities, allowing you to ground AI responses in your own documents. However, **there is currently no official visual interface** to manage File Search stores - you can only interact with them via API calls or SDKs.
+
+This tool fills that gap by providing:
+- A visual dashboard to see all your stores at a glance
+- Easy document upload with drag-and-drop support
+- Real-time upload progress and status tracking
+- Document metadata management and filtering
+- No need to write code or use curl commands
+
 ## Features
 
 - **Store Management** - Create, list, and delete file search stores
@@ -29,25 +40,51 @@ npm install
 
 ### 2. Configure environment variables
 
-Create a `.env.local` file:
+Create a `.env.local` file with the following variables:
 
 ```env
-# Google Generative AI API Key
-# Get from: https://aistudio.google.com/app/apikey
+# ===========================================
+# Google Generative AI API Key (Required)
+# ===========================================
+# This key is used to interact with the Gemini File Search API.
+# Get your API key from: https://aistudio.google.com/app/apikey
+# Note: Ensure the API key has access to the Generative Language API
 GOOGLE_API_KEY=your_api_key
 
-# NextAuth Configuration
+# ===========================================
+# NextAuth Configuration (Required)
+# ===========================================
+# NEXTAUTH_URL: The base URL of your application
+# - Use http://localhost:3000 for local development
+# - Use your production URL when deployed (e.g., https://myapp.vercel.app)
 NEXTAUTH_URL=http://localhost:3000
-AUTH_SECRET=generate_with_openssl_rand_base64_32
 
-# Google OAuth Credentials
-# Create at: https://console.cloud.google.com/apis/credentials
-# Add redirect URI: {NEXTAUTH_URL}/api/auth/callback/google
-GOOGLE_CLIENT_ID=your_client_id
+# AUTH_SECRET: A random string used to encrypt session tokens
+# Generate with: openssl rand -base64 32
+# Keep this secret and never commit it to version control
+AUTH_SECRET=generate_a_random_32_byte_string
+
+# ===========================================
+# Google OAuth Credentials (Required)
+# ===========================================
+# These credentials enable "Sign in with Google" functionality.
+#
+# To create OAuth credentials:
+# 1. Go to https://console.cloud.google.com/apis/credentials
+# 2. Create a new OAuth 2.0 Client ID (Web application type)
+# 3. Add authorized redirect URI: {NEXTAUTH_URL}/api/auth/callback/google
+#    For local dev: http://localhost:3000/api/auth/callback/google
+# 4. Copy the Client ID and Client Secret below
+GOOGLE_CLIENT_ID=your_client_id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your_client_secret
 
-# Optional: Restrict login to specific email domain
-# Remove or leave empty to allow all domains
+# ===========================================
+# Optional Settings
+# ===========================================
+# ALLOWED_DOMAIN: Restrict login to a specific email domain
+# - Leave empty to allow any Google account
+# - Set to your company domain to restrict access (e.g., "mycompany.com")
+# - Users with emails outside this domain will be denied access
 ALLOWED_DOMAIN=
 ```
 

@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uploadToStore, shouldSplitFile, splitFile, ChunkingConfig } from "@/lib/api";
+import { uploadToStore, splitFile, ChunkingConfig, isTextBasedFile } from "@/lib/api";
 import { auth } from "@/lib/auth";
 
 interface CustomMetadata {
   key: string;
   stringValue?: string;
   numericValue?: number;
+}
+
+interface SplitConfig {
+  enabled: boolean;
+  numberOfParts: number;
 }
 
 // Map of file extensions to MIME types for common document types
@@ -98,6 +103,19 @@ export async function POST(
         }
       }
 
+      // Parse split config (opt-in file splitting)
+      const splitConfigStr = formData.get("splitConfig") as string | null;
+      let splitConfig: SplitConfig | undefined;
+      if (splitConfigStr) {
+        try {
+          splitConfig = JSON.parse(splitConfigStr);
+        } catch {
+          await sendEvent("error", { message: "Invalid split config format" });
+          await writer.close();
+          return;
+        }
+      }
+
       const buffer = Buffer.from(await file.arrayBuffer());
       const mimeType = getMimeType(file.name, file.type);
 
@@ -107,13 +125,13 @@ export async function POST(
         mimeType,
       });
 
-      // Check if file needs to be split
-      if (shouldSplitFile(buffer.length)) {
-        const parts = splitFile(buffer, file.name, mimeType);
+      // Opt-in file splitting (only for text-based files)
+      if (splitConfig?.enabled && isTextBasedFile(mimeType)) {
+        const parts = splitFile(buffer, file.name, mimeType, splitConfig.numberOfParts);
 
         await sendEvent("splitting", {
           totalParts: parts.length,
-          message: `Large file detected. Splitting into ${parts.length} parts for reliable upload.`,
+          message: `Splitting into ${parts.length} parts as requested.`,
         });
 
         const operations = [];
@@ -180,7 +198,13 @@ export async function POST(
           message: `All ${parts.length} parts uploaded successfully!`,
         });
       } else {
-        // Regular upload for smaller files
+        // Regular upload (no splitting)
+        if (splitConfig?.enabled && !isTextBasedFile(mimeType)) {
+          await sendEvent("info", {
+            message: "Split requested but file is binary. Uploading as single file.",
+          });
+        }
+
         await sendEvent("uploading", {
           partNumber: 1,
           totalParts: 1,

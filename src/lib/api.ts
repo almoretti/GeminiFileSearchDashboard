@@ -236,71 +236,71 @@ async function withRetry<T>(
 const UPLOAD_BASE_URL = "https://generativelanguage.googleapis.com/upload/v1beta";
 const MAX_CHUNK_SIZE = 8 * 1024 * 1024; // 8MB chunks like the SDK
 const MAX_UPLOAD_RETRIES = 3;
-// Max file size before splitting (200KB to avoid 503 token counting errors)
-const MAX_FILE_SIZE_BEFORE_SPLIT = 200 * 1024;
-// Target size for each split part (~150KB - smaller to avoid server overload)
-const SPLIT_PART_SIZE = 150 * 1024;
 
-// Helper to split text content at natural boundaries (paragraphs/sections)
-function splitTextContent(content: string, maxPartSize: number): string[] {
-  const parts: string[] = [];
+// Check if a file is text-based (supports chunking and splitting)
+export function isTextBasedFile(mimeType: string): boolean {
+  return (
+    mimeType.startsWith("text/") ||
+    mimeType === "application/json" ||
+    mimeType === "application/xml"
+  );
+}
+
+// Split a text file into a specified number of parts (opt-in, user-controlled)
+export function splitFile(
+  content: Buffer,
+  fileName: string,
+  mimeType: string,
+  numberOfParts: number = 2
+): Array<{ buffer: Buffer; fileName: string; partNumber: number; totalParts: number }> {
+  // Only split text-based files
+  if (!isTextBasedFile(mimeType)) {
+    // Can't split binary files, return as-is
+    return [{ buffer: content, fileName, partNumber: 1, totalParts: 1 }];
+  }
+
+  // Ensure numberOfParts is within valid range
+  const parts = Math.max(2, Math.min(10, numberOfParts));
+
+  const textContent = content.toString("utf-8");
+  const contentLength = textContent.length;
+  const targetPartSize = Math.ceil(contentLength / parts);
+
+  // Split at natural boundaries (paragraphs/headers) near target size
+  const sections = textContent.split(/(\n\n+|\n(?=#{1,6}\s))/);
+  const resultParts: string[] = [];
   let currentPart = "";
 
-  // Split by double newlines (paragraphs) or markdown headers
-  const sections = content.split(/(\n\n+|\n(?=#{1,6}\s))/);
-
   for (const section of sections) {
-    // If adding this section would exceed max size, start a new part
-    if (currentPart.length + section.length > maxPartSize && currentPart.length > 0) {
-      parts.push(currentPart.trim());
-      currentPart = section;
+    // If we've reached our target parts count (minus 1 for the last), check if we should start a new part
+    if (resultParts.length < parts - 1) {
+      if (currentPart.length + section.length >= targetPartSize && currentPart.length > 0) {
+        resultParts.push(currentPart.trim());
+        currentPart = section;
+      } else {
+        currentPart += section;
+      }
     } else {
+      // Last part - add everything remaining
       currentPart += section;
     }
   }
 
   // Add the last part if not empty
   if (currentPart.trim()) {
-    parts.push(currentPart.trim());
+    resultParts.push(currentPart.trim());
   }
-
-  return parts;
-}
-
-// Check if file should be split based on size
-export function shouldSplitFile(fileSize: number): boolean {
-  return fileSize > MAX_FILE_SIZE_BEFORE_SPLIT;
-}
-
-// Split a text file into multiple parts
-export function splitFile(
-  content: Buffer,
-  fileName: string,
-  mimeType: string
-): Array<{ buffer: Buffer; fileName: string; partNumber: number; totalParts: number }> {
-  // Only split text-based files
-  const isTextFile = mimeType.startsWith("text/") ||
-                     mimeType === "application/json" ||
-                     mimeType === "application/xml";
-
-  if (!isTextFile) {
-    // Can't split binary files, return as-is
-    return [{ buffer: content, fileName, partNumber: 1, totalParts: 1 }];
-  }
-
-  const textContent = content.toString("utf-8");
-  const parts = splitTextContent(textContent, SPLIT_PART_SIZE);
 
   // Get file extension and base name
   const lastDotIndex = fileName.lastIndexOf(".");
   const baseName = lastDotIndex > 0 ? fileName.slice(0, lastDotIndex) : fileName;
   const extension = lastDotIndex > 0 ? fileName.slice(lastDotIndex) : "";
 
-  return parts.map((part, index) => ({
+  return resultParts.map((part, index) => ({
     buffer: Buffer.from(part, "utf-8"),
-    fileName: `${baseName}_part${index + 1}of${parts.length}${extension}`,
+    fileName: `${baseName}_part${index + 1}of${resultParts.length}${extension}`,
     partNumber: index + 1,
-    totalParts: parts.length,
+    totalParts: resultParts.length,
   }));
 }
 
@@ -335,8 +335,11 @@ export async function uploadToStore(
     requestBody.customMetadata = customMetadata;
   }
 
-  if (chunkingConfig) {
+  // Only apply chunking config to text-based files (API fails on binary data)
+  if (chunkingConfig && isTextBasedFile(mimeType)) {
     requestBody.chunking_config = chunkingConfig;
+  } else if (chunkingConfig) {
+    console.log(`[Upload] Skipping chunking config for binary file type: ${mimeType}`);
   }
 
   const uploadStartTime = Date.now();

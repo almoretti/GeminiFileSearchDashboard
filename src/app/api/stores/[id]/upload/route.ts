@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uploadToStore, shouldSplitFile, splitFile, ChunkingConfig } from "@/lib/api";
+import { uploadToStore, splitFile, ChunkingConfig, isTextBasedFile } from "@/lib/api";
 import { auth } from "@/lib/auth";
 
 interface CustomMetadata {
   key: string;
   stringValue?: string;
   numericValue?: number;
+}
+
+interface SplitConfig {
+  enabled: boolean;
+  numberOfParts: number;
 }
 
 // Map of file extensions to MIME types for common document types
@@ -92,68 +97,81 @@ export async function POST(
       }
     }
 
+    // Parse split config (opt-in file splitting)
+    const splitConfigStr = formData.get("splitConfig") as string | null;
+    let splitConfig: SplitConfig | undefined;
+    if (splitConfigStr) {
+      try {
+        splitConfig = JSON.parse(splitConfigStr);
+      } catch {
+        return NextResponse.json(
+          { error: "Invalid split config format" },
+          { status: 400 }
+        );
+      }
+    }
+
     const buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = getMimeType(file.name, file.type);
 
-    // Check if split is disabled via query param
-    const url = new URL(request.url);
-    const splitDisabled = url.searchParams.get("split") === "false";
-
     console.log(`[Route] Upload request received for store ${id}`);
-    console.log(`[Route] File: ${file.name}, Size: ${(file.size / 1024).toFixed(2)}KB, Browser MIME: ${file.type}, Resolved MIME: ${mimeType}, splitDisabled: ${splitDisabled}`);
+    console.log(`[Route] File: ${file.name}, Size: ${(file.size / 1024).toFixed(2)}KB, Browser MIME: ${file.type}, Resolved MIME: ${mimeType}`);
 
-    // Check if file needs to be split due to size (to avoid 503 token counting errors)
-    // Skip splitting if explicitly disabled
-    if (!splitDisabled && shouldSplitFile(buffer.length)) {
-      console.log(`[Route] File exceeds 500KB, splitting into smaller parts...`);
-      const parts = splitFile(buffer, file.name, mimeType);
-      console.log(`[Route] Split into ${parts.length} parts`);
+    // Opt-in file splitting (only for text-based files)
+    if (splitConfig?.enabled) {
+      if (!isTextBasedFile(mimeType)) {
+        console.log(`[Route] Split requested but file is binary (${mimeType}), uploading as single file`);
+      } else {
+        console.log(`[Route] Splitting file into ${splitConfig.numberOfParts} parts...`);
+        const parts = splitFile(buffer, file.name, mimeType, splitConfig.numberOfParts);
+        console.log(`[Route] Split into ${parts.length} parts`);
 
-      // Upload all parts sequentially with delay between uploads
-      const operations = [];
-      for (const part of parts) {
-        // Add delay between uploads to avoid overwhelming the server
-        if (part.partNumber > 1) {
-          console.log(`[Route] Waiting 2s before next upload...`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
+        // Upload all parts sequentially with delay between uploads
+        const operations = [];
+        for (const part of parts) {
+          // Add delay between uploads to avoid overwhelming the server
+          if (part.partNumber > 1) {
+            console.log(`[Route] Waiting 2s before next upload...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+          console.log(`[Route] Uploading part ${part.partNumber}/${part.totalParts}: ${part.fileName} (${(part.buffer.length / 1024).toFixed(2)}KB)`);
+
+          // Add part info to metadata
+          const partMetadata = [
+            ...(customMetadata || []),
+            { key: "originalFileName", stringValue: file.name },
+            { key: "partNumber", stringValue: part.partNumber.toString() },
+            { key: "totalParts", stringValue: part.totalParts.toString() },
+          ];
+
+          const operation = await uploadToStore(
+            id,
+            part.buffer,
+            part.fileName,
+            mimeType,
+            displayName ? `${displayName} (Part ${part.partNumber}/${part.totalParts})` : undefined,
+            partMetadata,
+            chunkingConfig
+          );
+          operations.push(operation);
+          console.log(`[Route] Part ${part.partNumber} uploaded: ${operation.name}`);
         }
-        console.log(`[Route] Uploading part ${part.partNumber}/${part.totalParts}: ${part.fileName} (${(part.buffer.length / 1024).toFixed(2)}KB)`);
 
-        // Add part info to metadata
-        const partMetadata = [
-          ...(customMetadata || []),
-          { key: "originalFileName", stringValue: file.name },
-          { key: "partNumber", stringValue: part.partNumber.toString() },
-          { key: "totalParts", stringValue: part.totalParts.toString() },
-        ];
-
-        const operation = await uploadToStore(
-          id,
-          part.buffer,
-          part.fileName,
-          mimeType,
-          displayName ? `${displayName} (Part ${part.partNumber}/${part.totalParts})` : undefined,
-          partMetadata,
-          chunkingConfig
-        );
-        operations.push(operation);
-        console.log(`[Route] Part ${part.partNumber} uploaded: ${operation.name}`);
+        // Return the last operation (client will poll this one)
+        // Include info about all parts in response
+        const lastOp = operations[operations.length - 1];
+        console.log(`[Route] All ${parts.length} parts uploaded successfully`);
+        return NextResponse.json({
+          ...lastOp,
+          splitInfo: {
+            totalParts: parts.length,
+            operations: operations.map(op => op.name),
+          },
+        });
       }
-
-      // Return the last operation (client will poll this one)
-      // Include info about all parts in response
-      const lastOp = operations[operations.length - 1];
-      console.log(`[Route] All ${parts.length} parts uploaded successfully`);
-      return NextResponse.json({
-        ...lastOp,
-        splitInfo: {
-          totalParts: parts.length,
-          operations: operations.map(op => op.name),
-        },
-      });
     }
 
-    // Regular upload for smaller files
+    // Regular upload (no splitting)
     const operation = await uploadToStore(
       id,
       buffer,

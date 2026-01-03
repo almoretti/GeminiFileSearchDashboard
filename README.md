@@ -16,7 +16,7 @@ This tool fills that gap by providing:
 ## Features
 
 - **Store Management** - Create, list, and delete file search stores
-- **Document Upload** - Upload documents with automatic large file splitting (>200KB)
+- **Document Upload** - Upload documents with optional file splitting
 - **Document Management** - View status, metadata, and delete documents
 - **Resumable Uploads** - Chunked uploads with retry logic for reliability
 - **Custom Metadata** - Add key-value metadata to documents
@@ -124,11 +124,36 @@ src/
     └── utils.ts                 # Helpers
 ```
 
-## Supported File Types
+## Supported File Types & Limitations
 
-**Documents:** PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX
-**Text:** MD, TXT, CSV, JSON, XML, HTML
-**Code:** JS, TS, PY, JAVA, C, CPP, CSS, SQL
+Google's File Search API has specific requirements for uploaded files:
+
+### Supported Formats
+| Category | Extensions |
+|----------|------------|
+| **Documents** | PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX |
+| **Text** | TXT, MD, CSV, JSON, XML, HTML, RTF |
+| **Code** | JS, TS, PY, JAVA, C, CPP, GO, RUST, CSS, SQL |
+| **Data** | JSON, XML, YAML, LaTeX, Jupyter notebooks |
+
+### Not Supported
+| Category | Why |
+|----------|-----|
+| **Images** (PNG, JPG, GIF, WebP) | FileSearch is text-based; cannot extract/index image content |
+| **Audio/Video** (MP3, MP4, WAV) | No audio/video transcription support |
+| **Archives** (ZIP contents) | Only the archive file itself, not extracted contents |
+
+### Size Limits
+- **Maximum file size:** 100 MB per file
+- **Recommendation:** For files approaching 100MB, consider splitting into smaller documents
+
+### Chunking Configuration
+Custom chunking is only applied to text-based files (TXT, MD, JSON, XML, code files). Binary documents (PDF, DOCX, etc.) use the API's default chunking.
+
+### File Splitting
+Text files can be optionally split into multiple parts (2-10) for:
+- Better granularity in search results
+- Working around token limits
 
 ## License
 

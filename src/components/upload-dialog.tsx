@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Upload, FileUp, X, CheckCircle, Plus, Trash2, SplitSquareHorizontal, FileBox, Settings2, ChevronDown, ChevronUp } from "lucide-react";
+import { Loader2, Upload, FileUp, X, CheckCircle, Plus, Trash2, SplitSquareHorizontal, Settings2, ChevronDown, ChevronUp, AlertCircle, AlertTriangle } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 
 interface UploadDialogProps {
@@ -49,13 +49,86 @@ export function UploadDialog({
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [progress, setProgress] = useState<UploadProgress | null>(null);
-  const [useSplitUpload, setUseSplitUpload] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [useCustomChunking, setUseCustomChunking] = useState(false);
   const [maxTokensPerChunk, setMaxTokensPerChunk] = useState(200);
   const [maxOverlapTokens, setMaxOverlapTokens] = useState(20);
+  const [enableSplitting, setEnableSplitting] = useState(false);
+  const [numberOfParts, setNumberOfParts] = useState(2);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+
+  // Check if file is text-based (can be split)
+  const isTextBasedFile = (mimeType: string): boolean => {
+    return (
+      mimeType.startsWith("text/") ||
+      mimeType === "application/json" ||
+      mimeType === "application/xml"
+    );
+  };
+
+  const getFileMimeType = (): string => {
+    if (!file) return "";
+    // Simple extension-based check for UI purposes
+    const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+    const textExtensions = [".txt", ".md", ".markdown", ".json", ".xml", ".csv", ".html", ".htm", ".js", ".ts", ".py", ".css", ".sql"];
+    if (textExtensions.includes(ext)) return "text/plain";
+    if (file.type) return file.type;
+    return "application/octet-stream";
+  };
+
+  const canSplitFile = file ? isTextBasedFile(getFileMimeType()) : false;
+
+  // File validation constants
+  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+
+  // Check if file type is supported by FileSearch API
+  const isUnsupportedFileType = (mimeType: string): boolean => {
+    return (
+      mimeType.startsWith("image/") ||
+      mimeType.startsWith("audio/") ||
+      mimeType.startsWith("video/")
+    );
+  };
+
+  // Get file validation status
+  const getFileValidation = (): { valid: boolean; error: string | null; warning: string | null } => {
+    if (!file) return { valid: true, error: null, warning: null };
+
+    const mimeType = getFileMimeType();
+
+    // Check for unsupported file types
+    if (isUnsupportedFileType(mimeType)) {
+      const fileType = mimeType.split("/")[0];
+      return {
+        valid: false,
+        error: `${fileType.charAt(0).toUpperCase() + fileType.slice(1)} files are not supported. FileSearch only supports documents, text, and code files.`,
+        warning: null,
+      };
+    }
+
+    // Check for file size limit
+    if (file.size > MAX_FILE_SIZE) {
+      return {
+        valid: false,
+        error: `File exceeds 100MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB). Please use a smaller file or split it externally.`,
+        warning: null,
+      };
+    }
+
+    // Warning for large files approaching limit
+    if (file.size > 80 * 1024 * 1024) {
+      return {
+        valid: true,
+        error: null,
+        warning: `Large file (${(file.size / 1024 / 1024).toFixed(1)}MB). Upload may take longer.`,
+      };
+    }
+
+    return { valid: true, error: null, warning: null };
+  };
+
+  const fileValidation = getFileValidation();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -197,9 +270,21 @@ export function UploadDialog({
         );
       }
 
-      console.log(`[Client] Starting upload for file: ${file.name}, size: ${(file.size / 1024).toFixed(2)}KB, splitMode: ${useSplitUpload}, customChunking: ${useCustomChunking}`);
+      // Add split config if enabled (only for text-based files)
+      const shouldSplit = enableSplitting && canSplitFile;
+      if (shouldSplit) {
+        formData.append(
+          "splitConfig",
+          JSON.stringify({
+            enabled: true,
+            numberOfParts: numberOfParts,
+          })
+        );
+      }
 
-      if (useSplitUpload) {
+      console.log(`[Client] Starting upload for file: ${file.name}, size: ${(file.size / 1024).toFixed(2)}KB, splitting: ${shouldSplit}, customChunking: ${useCustomChunking}`);
+
+      if (shouldSplit) {
         // Use streaming endpoint for progress updates (split upload)
         const response = await fetch(`/api/stores/${storeId}/upload-stream`, {
           method: "POST",
@@ -363,11 +448,12 @@ export function UploadDialog({
     setStatus("idle");
     setErrorMessage("");
     setProgress(null);
-    setUseSplitUpload(true);
     setShowAdvanced(false);
     setUseCustomChunking(false);
     setMaxTokensPerChunk(200);
     setMaxOverlapTokens(20);
+    setEnableSplitting(false);
+    setNumberOfParts(2);
     onOpenChange(false);
   };
 
@@ -437,6 +523,21 @@ export function UploadDialog({
               </>
             )}
           </div>
+
+          {/* File validation errors/warnings */}
+          {fileValidation.error && (
+            <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
+              <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+              <p className="text-sm text-destructive">{fileValidation.error}</p>
+            </div>
+          )}
+
+          {fileValidation.warning && (
+            <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+              <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-600">{fileValidation.warning}</p>
+            </div>
+          )}
 
           {/* Display name input */}
           <div className="grid gap-2">
@@ -509,31 +610,52 @@ export function UploadDialog({
             )}
           </div>
 
-          {/* Upload Method Toggle */}
-          <div className="flex items-center justify-between py-2 px-3 bg-muted/50 rounded-lg">
-            <div className="flex items-center gap-2">
-              {useSplitUpload ? (
+          {/* File Splitting Options */}
+          <div className="py-2 px-3 bg-muted/50 rounded-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
                 <SplitSquareHorizontal className="h-4 w-4 text-muted-foreground" />
-              ) : (
-                <FileBox className="h-4 w-4 text-muted-foreground" />
-              )}
-              <div>
-                <Label htmlFor="split-mode" className="text-sm font-medium cursor-pointer">
-                  {useSplitUpload ? "Split large files" : "Single file upload"}
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  {useSplitUpload
-                    ? "Splits files >200KB into parts (more reliable)"
-                    : "Upload as single file (may fail for large files)"}
-                </p>
+                <div>
+                  <Label htmlFor="split-mode" className="text-sm font-medium cursor-pointer">
+                    Split into multiple parts
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    Split text files into multiple documents for upload
+                  </p>
+                </div>
               </div>
+              <Switch
+                id="split-mode"
+                checked={enableSplitting}
+                onCheckedChange={setEnableSplitting}
+                disabled={isProcessing || (file !== null && !canSplitFile)}
+              />
             </div>
-            <Switch
-              id="split-mode"
-              checked={useSplitUpload}
-              onCheckedChange={setUseSplitUpload}
-              disabled={isProcessing}
-            />
+
+            {enableSplitting && canSplitFile && (
+              <div className="flex items-center gap-3 pl-6">
+                <Label htmlFor="num-parts" className="text-xs whitespace-nowrap">
+                  Number of parts:
+                </Label>
+                <Input
+                  id="num-parts"
+                  type="number"
+                  min={2}
+                  max={10}
+                  value={numberOfParts}
+                  onChange={(e) => setNumberOfParts(Math.min(10, Math.max(2, parseInt(e.target.value) || 2)))}
+                  disabled={isProcessing}
+                  className="h-8 w-20"
+                />
+                <span className="text-xs text-muted-foreground">(2-10)</span>
+              </div>
+            )}
+
+            {file && !canSplitFile && (
+              <p className="text-xs text-amber-600 pl-6">
+                Binary files (images, PDFs, Office docs) cannot be split. File will upload as a single document.
+              </p>
+            )}
           </div>
 
           {/* Advanced Settings */}
@@ -697,7 +819,7 @@ export function UploadDialog({
           </Button>
           <Button
             onClick={handleUpload}
-            disabled={!file || isProcessing || status === "complete"}
+            disabled={!file || isProcessing || status === "complete" || !fileValidation.valid}
           >
             {isProcessing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {status === "uploading"

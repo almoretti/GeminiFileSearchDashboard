@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { uploadToStore, splitFile, ChunkingConfig, isTextBasedFile } from "@/lib/api";
 import { auth } from "@/lib/auth";
+import {
+  isGhostscriptAvailable,
+  compressPdf,
+  splitPdfByPages,
+  getPdfPageCount,
+  getFileSizeMB,
+  PdfQuality,
+} from "@/lib/pdf-processor";
 
 interface CustomMetadata {
   key: string;
@@ -11,6 +19,13 @@ interface CustomMetadata {
 interface SplitConfig {
   enabled: boolean;
   numberOfParts: number;
+}
+
+interface PdfConfig {
+  compress: boolean;
+  quality: PdfQuality;
+  splitIfOverLimit: boolean;
+  pagesPerPart?: number;
 }
 
 // Map of file extensions to MIME types for common document types
@@ -111,11 +126,100 @@ export async function POST(
       }
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
+    // Parse PDF config (compression and page splitting)
+    const pdfConfigStr = formData.get("pdfConfig") as string | null;
+    let pdfConfig: PdfConfig | undefined;
+    if (pdfConfigStr) {
+      try {
+        pdfConfig = JSON.parse(pdfConfigStr);
+      } catch {
+        return NextResponse.json(
+          { error: "Invalid PDF config format" },
+          { status: 400 }
+        );
+      }
+    }
+
+    let buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = getMimeType(file.name, file.type);
 
     console.log(`[Route] Upload request received for store ${id}`);
     console.log(`[Route] File: ${file.name}, Size: ${(file.size / 1024).toFixed(2)}KB, Browser MIME: ${file.type}, Resolved MIME: ${mimeType}`);
+
+    // PDF processing (compression and/or page splitting)
+    if (mimeType === "application/pdf" && pdfConfig) {
+      const gsAvailable = await isGhostscriptAvailable();
+
+      if (!gsAvailable) {
+        console.log(`[Route] Ghostscript not available, skipping PDF processing`);
+      } else {
+        const originalSizeMB = getFileSizeMB(buffer);
+        console.log(`[Route] PDF original size: ${originalSizeMB.toFixed(2)}MB`);
+
+        // Compress PDF if requested
+        if (pdfConfig.compress) {
+          console.log(`[Route] Compressing PDF with quality: ${pdfConfig.quality}`);
+          buffer = await compressPdf(buffer, { quality: pdfConfig.quality });
+          const newSizeMB = getFileSizeMB(buffer);
+          console.log(`[Route] PDF compressed: ${originalSizeMB.toFixed(2)}MB -> ${newSizeMB.toFixed(2)}MB (${((1 - newSizeMB / originalSizeMB) * 100).toFixed(1)}% reduction)`);
+        }
+
+        // Split PDF by pages if still over 100MB and splitting is enabled
+        const currentSizeMB = getFileSizeMB(buffer);
+        if (pdfConfig.splitIfOverLimit && currentSizeMB > 100) {
+          const pageCount = await getPdfPageCount(buffer);
+          const pagesPerPart = pdfConfig.pagesPerPart || Math.ceil(pageCount / Math.ceil(currentSizeMB / 90)); // Target ~90MB parts
+          console.log(`[Route] PDF still over 100MB (${currentSizeMB.toFixed(2)}MB), splitting ${pageCount} pages into parts of ${pagesPerPart} pages each`);
+
+          const parts = await splitPdfByPages(buffer, pagesPerPart, file.name);
+          console.log(`[Route] Split into ${parts.length} PDF parts`);
+
+          // Upload all parts
+          const operations = [];
+          for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            if (i > 0) {
+              console.log(`[Route] Waiting 2s before next upload...`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            console.log(`[Route] Uploading PDF part ${i + 1}/${parts.length}: ${part.filename} (${getFileSizeMB(part.buffer).toFixed(2)}MB, pages ${part.pageStart}-${part.pageEnd})`);
+
+            const partMetadata = [
+              ...(customMetadata || []),
+              { key: "originalFileName", stringValue: file.name },
+              { key: "partNumber", stringValue: (i + 1).toString() },
+              { key: "totalParts", stringValue: parts.length.toString() },
+              { key: "pageStart", stringValue: part.pageStart.toString() },
+              { key: "pageEnd", stringValue: part.pageEnd.toString() },
+            ];
+
+            const operation = await uploadToStore(
+              id,
+              part.buffer,
+              part.filename,
+              mimeType,
+              displayName ? `${displayName} (Part ${i + 1}/${parts.length})` : undefined,
+              partMetadata,
+              undefined // No chunking config for PDFs
+            );
+            operations.push(operation);
+            console.log(`[Route] PDF part ${i + 1} uploaded: ${operation.name}`);
+          }
+
+          const lastOp = operations[operations.length - 1];
+          console.log(`[Route] All ${parts.length} PDF parts uploaded successfully`);
+          return NextResponse.json({
+            ...lastOp,
+            pdfSplitInfo: {
+              totalParts: parts.length,
+              operations: operations.map(op => op.name),
+              compressionApplied: pdfConfig.compress,
+            },
+          });
+        }
+      }
+    }
 
     // Opt-in file splitting (only for text-based files)
     if (splitConfig?.enabled) {

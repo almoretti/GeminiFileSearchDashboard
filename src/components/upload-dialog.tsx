@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -13,8 +13,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Upload, FileUp, X, CheckCircle, Plus, Trash2, SplitSquareHorizontal, Settings2, ChevronDown, ChevronUp, AlertCircle, AlertTriangle } from "lucide-react";
+import { Loader2, Upload, FileUp, X, CheckCircle, Plus, Trash2, SplitSquareHorizontal, Settings2, ChevronDown, ChevronUp, AlertCircle, AlertTriangle, FileArchive, Info } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+type PdfQuality = "screen" | "ebook" | "printer" | "prepress";
 
 interface UploadDialogProps {
   open: boolean;
@@ -55,8 +64,29 @@ export function UploadDialog({
   const [maxOverlapTokens, setMaxOverlapTokens] = useState(20);
   const [enableSplitting, setEnableSplitting] = useState(false);
   const [numberOfParts, setNumberOfParts] = useState(2);
+  // PDF processing options
+  const [pdfProcessingAvailable, setPdfProcessingAvailable] = useState(false);
+  const [enablePdfCompression, setEnablePdfCompression] = useState(false);
+  const [pdfQuality, setPdfQuality] = useState<PdfQuality>("ebook");
+  const [enablePdfSplitIfOverLimit, setEnablePdfSplitIfOverLimit] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+
+  // Check if PDF processing (Ghostscript) is available
+  useEffect(() => {
+    async function checkPdfProcessing() {
+      try {
+        const response = await fetch("/api/pdf-processing/available");
+        if (response.ok) {
+          const data = await response.json();
+          setPdfProcessingAvailable(data.available);
+        }
+      } catch {
+        setPdfProcessingAvailable(false);
+      }
+    }
+    checkPdfProcessing();
+  }, []);
 
   // Check if file is text-based (can be split)
   const isTextBasedFile = (mimeType: string): boolean => {
@@ -78,6 +108,7 @@ export function UploadDialog({
   };
 
   const canSplitFile = file ? isTextBasedFile(getFileMimeType()) : false;
+  const isPdfFile = file ? getFileMimeType() === "application/pdf" : false;
 
   // File validation constants
   const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -109,6 +140,14 @@ export function UploadDialog({
 
     // Check for file size limit
     if (file.size > MAX_FILE_SIZE) {
+      // If it's a PDF and PDF processing is available, allow larger files
+      if (mimeType === "application/pdf" && pdfProcessingAvailable) {
+        return {
+          valid: true,
+          error: null,
+          warning: `Large PDF (${(file.size / 1024 / 1024).toFixed(1)}MB). Enable compression and/or auto-split to process.`,
+        };
+      }
       return {
         valid: false,
         error: `File exceeds 100MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB). Please use a smaller file or split it externally.`,
@@ -282,10 +321,24 @@ export function UploadDialog({
         );
       }
 
-      console.log(`[Client] Starting upload for file: ${file.name}, size: ${(file.size / 1024).toFixed(2)}KB, splitting: ${shouldSplit}, customChunking: ${useCustomChunking}`);
+      // Add PDF config if enabled
+      const shouldProcessPdf = isPdfFile && pdfProcessingAvailable && (enablePdfCompression || enablePdfSplitIfOverLimit);
+      if (shouldProcessPdf) {
+        formData.append(
+          "pdfConfig",
+          JSON.stringify({
+            compress: enablePdfCompression,
+            quality: pdfQuality,
+            splitIfOverLimit: enablePdfSplitIfOverLimit,
+          })
+        );
+      }
 
-      if (shouldSplit) {
-        // Use streaming endpoint for progress updates (split upload)
+      console.log(`[Client] Starting upload for file: ${file.name}, size: ${(file.size / 1024).toFixed(2)}KB, splitting: ${shouldSplit}, pdfProcessing: ${shouldProcessPdf}, customChunking: ${useCustomChunking}`);
+
+      // Use streaming endpoint for split uploads or PDF processing
+      if (shouldSplit || shouldProcessPdf) {
+        // Use streaming endpoint for progress updates
         const response = await fetch(`/api/stores/${storeId}/upload-stream`, {
           method: "POST",
           body: formData,
@@ -327,10 +380,37 @@ export function UploadDialog({
               console.log(`[Client] SSE event: ${eventType}`, data);
 
               switch (eventType) {
+                case "info":
+                  // Informational message (e.g., PDF processing unavailable)
+                  setProgress(prev => ({
+                    currentPart: prev?.currentPart || 0,
+                    totalParts: prev?.totalParts || 1,
+                    message: data.message,
+                  }));
+                  break;
+
+                case "processing":
+                  // PDF compression or split in progress
+                  setProgress(prev => ({
+                    currentPart: prev?.currentPart || 0,
+                    totalParts: prev?.totalParts || 1,
+                    message: data.message,
+                  }));
+                  break;
+
+                case "processed":
+                  // PDF compression complete
+                  setProgress(prev => ({
+                    currentPart: prev?.currentPart || 0,
+                    totalParts: prev?.totalParts || 1,
+                    message: data.message,
+                  }));
+                  break;
+
                 case "splitting":
                   setProgress({
                     currentPart: 0,
-                    totalParts: data.totalParts,
+                    totalParts: data.totalParts || 1,
                     message: data.message,
                   });
                   break;
@@ -454,6 +534,9 @@ export function UploadDialog({
     setMaxOverlapTokens(20);
     setEnableSplitting(false);
     setNumberOfParts(2);
+    setEnablePdfCompression(false);
+    setPdfQuality("ebook");
+    setEnablePdfSplitIfOverLimit(false);
     onOpenChange(false);
   };
 
@@ -651,12 +734,97 @@ export function UploadDialog({
               </div>
             )}
 
-            {file && !canSplitFile && (
+            {file && !canSplitFile && !isPdfFile && (
               <p className="text-xs text-amber-600 pl-6">
-                Binary files (images, PDFs, Office docs) cannot be split. File will upload as a single document.
+                Binary files (images, Office docs) cannot be split. File will upload as a single document.
               </p>
             )}
           </div>
+
+          {/* PDF Processing Options */}
+          {isPdfFile && (
+            <div className="py-2 px-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg space-y-3 border border-blue-200 dark:border-blue-900">
+              <div className="flex items-center gap-2">
+                <FileArchive className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                <span className="text-sm font-medium text-blue-700 dark:text-blue-300">PDF Processing</span>
+                {!pdfProcessingAvailable && (
+                  <span className="text-xs bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded">
+                    Docker only
+                  </span>
+                )}
+              </div>
+
+              {pdfProcessingAvailable ? (
+                <>
+                  {/* Compression toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label htmlFor="pdf-compress" className="text-sm font-medium cursor-pointer">
+                        Compress PDF
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        Reduce file size before upload
+                      </p>
+                    </div>
+                    <Switch
+                      id="pdf-compress"
+                      checked={enablePdfCompression}
+                      onCheckedChange={setEnablePdfCompression}
+                      disabled={isProcessing}
+                    />
+                  </div>
+
+                  {/* Quality selector */}
+                  {enablePdfCompression && (
+                    <div className="pl-1 space-y-2">
+                      <Label htmlFor="pdf-quality" className="text-xs">Compression Quality</Label>
+                      <Select
+                        value={pdfQuality}
+                        onValueChange={(value: PdfQuality) => setPdfQuality(value)}
+                        disabled={isProcessing}
+                      >
+                        <SelectTrigger id="pdf-quality" className="h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="screen">Low (72 dpi) - Smallest file</SelectItem>
+                          <SelectItem value="ebook">Medium (150 dpi) - Recommended</SelectItem>
+                          <SelectItem value="printer">High (300 dpi) - Best quality</SelectItem>
+                          <SelectItem value="prepress">Maximum - Minimal compression</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+
+                  {/* Auto-split toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label htmlFor="pdf-split" className="text-sm font-medium cursor-pointer">
+                        Auto-split if over 100MB
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        Split large PDFs by page ranges
+                      </p>
+                    </div>
+                    <Switch
+                      id="pdf-split"
+                      checked={enablePdfSplitIfOverLimit}
+                      onCheckedChange={setEnablePdfSplitIfOverLimit}
+                      disabled={isProcessing}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-start gap-2 text-xs text-muted-foreground">
+                  <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                  <p>
+                    PDF compression and splitting requires Ghostscript, which is only available when running in Docker.
+                    The PDF will be uploaded without processing.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Advanced Settings */}
           <div className="border rounded-lg">
@@ -755,31 +923,28 @@ export function UploadDialog({
           </div>
 
           {/* Status display */}
-          {status === "uploading" && progress && progress.totalParts > 1 && (
+          {status === "uploading" && (
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>{progress.message}</span>
+                <span>{progress?.message || "Uploading file..."}</span>
               </div>
-              {/* Progress bar */}
-              <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-primary h-full transition-all duration-300 ease-out"
-                  style={{
-                    width: `${Math.max(5, (progress.currentPart / progress.totalParts) * 100)}%`,
-                  }}
-                />
-              </div>
-              <div className="text-xs text-muted-foreground text-center">
-                Part {progress.currentPart} of {progress.totalParts}
-              </div>
-            </div>
-          )}
-
-          {status === "uploading" && (!progress || progress.totalParts === 1) && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Uploading file...
+              {/* Progress bar for multi-part uploads */}
+              {progress && progress.totalParts > 1 && (
+                <>
+                  <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-primary h-full transition-all duration-300 ease-out"
+                      style={{
+                        width: `${Math.max(5, (progress.currentPart / progress.totalParts) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="text-xs text-muted-foreground text-center">
+                    Part {progress.currentPart} of {progress.totalParts}
+                  </div>
+                </>
+              )}
             </div>
           )}
 

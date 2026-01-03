@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { uploadToStore, splitFile, ChunkingConfig, isTextBasedFile } from "@/lib/api";
 import { auth } from "@/lib/auth";
+import {
+  isGhostscriptAvailable,
+  compressPdf,
+  splitPdfByPages,
+  getPdfPageCount,
+  getFileSizeMB,
+  PdfQuality,
+} from "@/lib/pdf-processor";
 
 interface CustomMetadata {
   key: string;
@@ -11,6 +19,13 @@ interface CustomMetadata {
 interface SplitConfig {
   enabled: boolean;
   numberOfParts: number;
+}
+
+interface PdfConfig {
+  compress: boolean;
+  quality: PdfQuality;
+  splitIfOverLimit: boolean;
+  pagesPerPart?: number;
 }
 
 // Map of file extensions to MIME types for common document types
@@ -116,7 +131,20 @@ export async function POST(
         }
       }
 
-      const buffer = Buffer.from(await file.arrayBuffer());
+      // Parse PDF config (compression and page splitting)
+      const pdfConfigStr = formData.get("pdfConfig") as string | null;
+      let pdfConfig: PdfConfig | undefined;
+      if (pdfConfigStr) {
+        try {
+          pdfConfig = JSON.parse(pdfConfigStr);
+        } catch {
+          await sendEvent("error", { message: "Invalid PDF config format" });
+          await writer.close();
+          return;
+        }
+      }
+
+      let buffer = Buffer.from(await file.arrayBuffer());
       const mimeType = getMimeType(file.name, file.type);
 
       await sendEvent("start", {
@@ -124,6 +152,131 @@ export async function POST(
         fileSize: file.size,
         mimeType,
       });
+
+      // PDF processing (compression and/or page splitting)
+      if (mimeType === "application/pdf" && pdfConfig) {
+        const gsAvailable = await isGhostscriptAvailable();
+
+        if (!gsAvailable) {
+          await sendEvent("info", {
+            message: "PDF processing unavailable (Ghostscript not installed). Uploading original file.",
+          });
+        } else {
+          const originalSizeMB = getFileSizeMB(buffer);
+
+          // Compress PDF if requested
+          if (pdfConfig.compress) {
+            await sendEvent("processing", {
+              type: "compress",
+              message: `Compressing PDF (${originalSizeMB.toFixed(1)}MB) with ${pdfConfig.quality} quality...`,
+            });
+
+            buffer = await compressPdf(buffer, { quality: pdfConfig.quality });
+            const newSizeMB = getFileSizeMB(buffer);
+            const reduction = ((1 - newSizeMB / originalSizeMB) * 100).toFixed(1);
+
+            await sendEvent("processed", {
+              type: "compress",
+              originalSizeMB: originalSizeMB.toFixed(2),
+              newSizeMB: newSizeMB.toFixed(2),
+              reduction: `${reduction}%`,
+              message: `Compressed: ${originalSizeMB.toFixed(1)}MB → ${newSizeMB.toFixed(1)}MB (${reduction}% reduction)`,
+            });
+          }
+
+          // Split PDF by pages if still over 100MB and splitting is enabled
+          const currentSizeMB = getFileSizeMB(buffer);
+          if (pdfConfig.splitIfOverLimit && currentSizeMB > 100) {
+            await sendEvent("processing", {
+              type: "split",
+              message: `PDF still over 100MB (${currentSizeMB.toFixed(1)}MB). Splitting by pages...`,
+            });
+
+            const pageCount = await getPdfPageCount(buffer);
+            const pagesPerPart = pdfConfig.pagesPerPart || Math.ceil(pageCount / Math.ceil(currentSizeMB / 90));
+
+            await sendEvent("splitting", {
+              totalPages: pageCount,
+              pagesPerPart,
+              message: `Splitting ${pageCount} pages into parts of ${pagesPerPart} pages each...`,
+            });
+
+            const parts = await splitPdfByPages(buffer, pagesPerPart, file.name);
+
+            const operations = [];
+            for (let i = 0; i < parts.length; i++) {
+              const part = parts[i];
+
+              if (i > 0) {
+                await sendEvent("waiting", {
+                  partNumber: i + 1,
+                  totalParts: parts.length,
+                  message: "Waiting before next upload...",
+                });
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+
+              await sendEvent("uploading", {
+                partNumber: i + 1,
+                totalParts: parts.length,
+                partSize: part.buffer.length,
+                fileName: part.filename,
+                pageRange: `${part.pageStart}-${part.pageEnd}`,
+                message: `Uploading part ${i + 1}/${parts.length} (pages ${part.pageStart}-${part.pageEnd})...`,
+              });
+
+              const partMetadata = [
+                ...(customMetadata || []),
+                { key: "originalFileName", stringValue: file.name },
+                { key: "partNumber", stringValue: (i + 1).toString() },
+                { key: "totalParts", stringValue: parts.length.toString() },
+                { key: "pageStart", stringValue: part.pageStart.toString() },
+                { key: "pageEnd", stringValue: part.pageEnd.toString() },
+              ];
+
+              try {
+                const operation = await uploadToStore(
+                  id,
+                  part.buffer,
+                  part.filename,
+                  mimeType,
+                  displayName ? `${displayName} (Part ${i + 1}/${parts.length})` : undefined,
+                  partMetadata,
+                  undefined // No chunking config for PDFs
+                );
+                operations.push(operation);
+
+                await sendEvent("partComplete", {
+                  partNumber: i + 1,
+                  totalParts: parts.length,
+                  operationName: operation.name,
+                  message: `Part ${i + 1}/${parts.length} uploaded successfully`,
+                });
+              } catch (error) {
+                await sendEvent("partError", {
+                  partNumber: i + 1,
+                  totalParts: parts.length,
+                  error: error instanceof Error ? error.message : "Upload failed",
+                  message: `Failed to upload part ${i + 1}. ${operations.length} parts uploaded successfully.`,
+                });
+                throw error;
+              }
+            }
+
+            const lastOp = operations[operations.length - 1];
+            await sendEvent("complete", {
+              operationName: lastOp.name,
+              totalParts: parts.length,
+              operations: operations.map(op => op.name),
+              compressionApplied: pdfConfig.compress,
+              message: `All ${parts.length} PDF parts uploaded successfully!`,
+            });
+
+            // Writer will be closed in finally block
+            return;
+          }
+        }
+      }
 
       // Opt-in file splitting (only for text-based files)
       if (splitConfig?.enabled && isTextBasedFile(mimeType)) {
@@ -228,11 +381,19 @@ export async function POST(
         });
       }
     } catch (error) {
-      await sendEvent("error", {
-        message: error instanceof Error ? error.message : "Upload failed",
-      });
+      try {
+        await sendEvent("error", {
+          message: error instanceof Error ? error.message : "Upload failed",
+        });
+      } catch {
+        // Ignore errors when sending error event (stream may already be closed)
+      }
     } finally {
-      await writer.close();
+      try {
+        await writer.close();
+      } catch {
+        // Ignore close errors (stream may already be closed)
+      }
     }
   })();
 

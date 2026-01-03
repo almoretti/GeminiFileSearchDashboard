@@ -21,6 +21,7 @@ This tool fills that gap by providing:
 - **Resumable Uploads** - Chunked uploads with retry logic for reliability
 - **Custom Metadata** - Add key-value metadata to documents
 - **Google OAuth** - Secure authentication with optional domain restriction
+- **PDF Processing** - Compress and auto-split large PDFs using Ghostscript (requires Docker or local Ghostscript install)
 
 ## Tech Stack
 
@@ -110,18 +111,24 @@ src/
 │   ├── login/page.tsx           # Login page
 │   ├── stores/[id]/page.tsx     # Store detail
 │   └── api/
-│       ├── stores/              # Store CRUD endpoints
+│       ├── stores/              # Store CRUD + upload endpoints
 │       ├── operations/          # Long-running operation polling
+│       ├── pdf-processing/      # PDF processing availability
 │       └── auth/                # NextAuth handler
 ├── components/
 │   ├── dashboard-client.tsx     # Main dashboard
 │   ├── store-detail-client.tsx  # Store documents view
-│   ├── upload-dialog.tsx        # File upload with splitting
+│   ├── upload-dialog.tsx        # File upload with PDF options
 │   └── ui/                      # Radix UI components
 └── lib/
     ├── auth.ts                  # NextAuth config
     ├── api.ts                   # Google File Search API client
+    ├── pdf-processor.ts         # Ghostscript PDF compression
     └── utils.ts                 # Helpers
+
+# Docker deployment files
+Dockerfile                       # Multi-stage build with Ghostscript
+docker-compose.yml               # Easy deployment config
 ```
 
 ## Supported File Types & Limitations
@@ -145,7 +152,7 @@ Google's File Search API has specific requirements for uploaded files:
 
 ### Size Limits
 - **Maximum file size:** 100 MB per file
-- **Recommendation:** For files approaching 100MB, consider splitting into smaller documents
+- **Recommendation:** For files approaching 100MB, use Docker deployment with PDF compression enabled
 
 ### Chunking Configuration
 Custom chunking is only applied to text-based files (TXT, MD, JSON, XML, code files). Binary documents (PDF, DOCX, etc.) use the API's default chunking.
@@ -154,6 +161,58 @@ Custom chunking is only applied to text-based files (TXT, MD, JSON, XML, code fi
 Text files can be optionally split into multiple parts (2-10) for:
 - Better granularity in search results
 - Working around token limits
+
+## Docker Deployment
+
+Docker deployment includes **Ghostscript** for PDF compression and auto-splitting. These features also work locally if you have Ghostscript installed (`brew install ghostscript` on macOS).
+
+### PDF Processing Features
+- **PDF Compression**: Reduce PDF file sizes by 30-80% before upload
+- **Auto-Split Large PDFs**: Automatically split PDFs over 100MB into smaller parts by page ranges
+- **Quality Options**: Choose from screen (72 dpi), ebook (150 dpi), printer (300 dpi), or prepress quality
+
+### Quick Start with Docker Compose
+
+1. Create a `.env` file (or use `.env.local`):
+```env
+GOOGLE_API_KEY=your_api_key
+NEXTAUTH_URL=http://localhost:3000
+AUTH_SECRET=your_secret
+GOOGLE_CLIENT_ID=your_client_id
+GOOGLE_CLIENT_SECRET=your_client_secret
+```
+
+2. Build and run:
+```bash
+docker-compose up --build
+```
+
+3. Open [http://localhost:3000](http://localhost:3000)
+
+### Build Docker Image Manually
+
+```bash
+# Build the image
+docker build -t filesearch-manager .
+
+# Run the container
+docker run -p 3000:3000 \
+  -e GOOGLE_API_KEY=your_api_key \
+  -e NEXTAUTH_URL=http://localhost:3000 \
+  -e AUTH_SECRET=your_secret \
+  -e GOOGLE_CLIENT_ID=your_client_id \
+  -e GOOGLE_CLIENT_SECRET=your_client_secret \
+  filesearch-manager
+```
+
+### PDF Compression Quality Settings
+
+| Setting | DPI | Use Case | Compression |
+|---------|-----|----------|-------------|
+| **Screen** | 72 | Web viewing | Highest (smallest file) |
+| **Ebook** | 150 | E-readers, general use | Medium (recommended) |
+| **Printer** | 300 | Print quality | Low |
+| **Prepress** | 300 | Professional print | Minimal |
 
 ## License
 

@@ -36,7 +36,6 @@ next-env.d.ts
 # IDE/editor
 *.code-workspace
 .claude/
-CLAUDE.md
 
 # Test files
 test-*.md
